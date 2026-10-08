@@ -1,6 +1,9 @@
 name: Build APK
 
 on:
+  push:
+    paths:
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 permissions:
@@ -9,7 +12,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,35 +28,78 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+
+      - name: Merge parts & extract ZIP if present
+        run: |
+          if ls zipparts/part-* >/dev/null 2>&1; then
+            cat zipparts/part-* > www.zip
+            ls -la www.zip; rm -rf zipparts
+          fi
+          if [ -f www.zip ]; then
+            rm -rf www www-tmp
+            mkdir -p www-tmp
+            unzip -q www.zip -d www-tmp -x "__MACOSX/*" "*.DS_Store"
+            IDX=$(find www-tmp -maxdepth 3 -type f -name index.html | head -n1)
+            if [ -z "$IDX" ]; then echo "index.html tidak ditemukan di ZIP"; ls -R www-tmp; exit 1; fi
+            ROOT=$(dirname "$IDX")
+            if [ "$ROOT" = "www-tmp" ]; then
+              mkdir www && cp -r www-tmp/. www/
+            else
+              mv "$ROOT" www
+            fi
+            rm -rf www-tmp
+            ls -la www
+          fi
+
+      - name: Verify www
+        run: test -d www || { echo "folder www tidak ada"; exit 1; }
+
       - name: Install Cordova CLI
         run: npm install -g cordova@12
 
       - name: Add Android platform
         run: cordova platform add android@13
 
-      - name: Restore plugins from config.xml
-        run: cordova plugin list || true
+      - name: List plugins
+        run: cordova plugin ls
 
       - name: Build debug APK
-        run: cordova build android
+        env:
+          GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g
+        run: cordova build android --stacktrace
 
       - name: Locate APK
+        if: success()
         run: |
           APK=$(find platforms/android -path "*outputs*" -name "*.apk" | head -n 1)
+          test -n "$APK" || { echo "APK tidak ditemukan"; exit 1; }
           echo "APK_PATH=$APK" >> "$GITHUB_ENV"
 
       - name: Upload artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
           path: ${{ env.APK_PATH }}
 
       - name: Publish to GitHub Release
+        if: success()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: "APK Build #${{ github.run_number }}",
+          name: APK Build ${{ github.run_number }}
           body: APK debug otomatis dari Builder Pro+
           files: ${{ env.APK_PATH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== JAVA ==="; java -version 2>&1 || true
+          echo "=== SDK ==="; ls "$ANDROID_HOME/platforms" 2>/dev/null || true
+          echo "=== BUILD TOOLS ==="; ls "$ANDROID_HOME/build-tools" 2>/dev/null || true
+          echo "=== CORDOVA ==="; cordova info || true
+# builder-pro build 2026-10-08T19:04:52.352Z
